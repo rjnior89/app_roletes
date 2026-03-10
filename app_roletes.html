@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mapa de Cavaletes - Relatório Detalhado</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Bibliotecas para PDF (jsPDF e html2canvas) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    
+    <style>
+        :root { font-family: 'Inter', sans-serif; }
+        .drum-color { background-color: #374151; }
+        .roller-default { background-color: #D1D5DB; }
+        .guide-default { background-color: #9CA3AF; }
+        .replace-color { background-color: #EF4444 !important; } 
+        .replaced-color { background-color: #10B981 !important; cursor: default !important; } 
+        .load-body-color { background-color: #F3F4F6; }
+        .return-body-color { background-color: #4B5563; }
+        
+        .conveyor-wrapper { width: 100%; display: flex; flex-direction: column; align-items: center; }
+        .roller-interativo { cursor: pointer; border: 1px solid rgba(0,0,0,0.1); }
+        .roller-interativo.replaced-color { cursor: not-allowed; }
+        
+        .spinner { border: 4px solid rgba(0, 0, 0, 0.1); width: 36px; height: 36px; border-radius: 50%; border-left-color: #3B82F6; animation: spin 1s ease infinite; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        
+        #carga-overflow, #retorno-overflow { overflow: hidden !important; border-radius: 4px; }
+
+        .pdf-capture-mode {
+            width: 1200px !important;
+            padding: 20px !important;
+            background: white !important;
+        }
+
+        .guide-horizontal { width: 6px; height: 8px; border-radius: 1px; margin: 2px 0; }
+        @media (min-width: 768px) { .guide-horizontal { width: 14px; height: 18px; margin: 6px 0; border-radius: 2px; } }
+
+        .roller-return-main { width: 12px; height: 30px; border-radius: 3px; }
+        @media (min-width: 768px) { .roller-return-main { width: 32px; height: 100px; border-radius: 6px; } }
+
+        .trestle-container { display: flex; flex-direction: column; align-items: center; justify-content: center; position: relative; padding: 0 2px; }
+        @media (min-width: 768px) { .trestle-container { padding: 0 4px; } }
+    </style>
+</head>
+<body class="bg-gray-100 p-1 md:p-4 min-h-screen flex flex-col items-center">
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, onSnapshot, collection, setDoc, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        window.firebase = { initializeApp, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, getFirestore, doc, onSnapshot, collection, setDoc, getDoc };
+        window.__app_id = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        window.__firebase_config = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        window.__initial_auth_token = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+    </script>
+    
+    <div id="capture-area" class="conveyor-wrapper w-full p-2 md:p-6 bg-white shadow-xl rounded-xl relative">
+        
+        <div id="loader" class="flex justify-center items-center h-40 w-full mb-4">
+            <div class="spinner"></div>
+            <span class="ml-3 text-gray-600 font-medium text-sm">Carregando dados...</span>
+        </div>
+        
+        <div id="header-controls" class="w-full mb-6 hidden">
+            <div class="flex flex-col lg:flex-row justify-between items-center gap-4">
+                <div class="flex items-center space-x-2 bg-gray-50 p-2 rounded-lg border border-gray-200">
+                    <label for="conveyor-select" class="text-[10px] md:text-xs font-bold text-gray-600 uppercase">Equipamento:</label>
+                    <select id="conveyor-select" onchange="handleConveyorChange(this.value)" class="p-1 bg-white border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 text-sm md:text-base font-bold text-blue-800"></select>
+                </div>
+                <h1 id="main-title" class="text-lg md:text-2xl font-black text-gray-800 text-center tracking-tight uppercase">MAPA DE CAVALETES</h1>
+                <div class="flex gap-2">
+                    <button id="btn-export-pdf" onclick="window.exportToPDF()" class="bg-emerald-600 text-white px-3 py-1.5 rounded-lg text-[10px] md:text-xs font-bold shadow-md flex items-center gap-2">
+                        Exportar PDF
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Área que será capturada no PDF -->
+        <div id="pdf-content" class="w-full bg-white">
+            <div id="conveyor-visualization" class="w-full space-y-8 hidden p-1">
+                <!-- Seção de Carga -->
+                <div class="flex items-center relative group">
+                    <div class="drum-color w-6 md:w-12 h-24 md:h-48 rounded-l-lg flex flex-col justify-center items-center text-[8px] md:text-[10px] text-white p-1 text-center font-bold shadow-inner uppercase">MOV.</div>
+                    <div id="carga-overflow" class="load-body-color flex-grow h-48 md:h-64 flex flex-col justify-center items-center relative p-1 shadow-inner border-y border-gray-200"></div>
+                    <div class="drum-color w-6 md:w-12 h-24 md:h-48 rounded-r-lg flex flex-col justify-center items-center text-[8px] md:text-[10px] text-white p-1 text-center font-bold shadow-inner uppercase">MOT.</div>
+                </div>
+
+                <!-- Seção de Retorno -->
+                <div class="flex items-center relative group">
+                    <div class="drum-color w-6 md:w-12 h-24 md:h-48 rounded-l-lg flex flex-col justify-center items-center text-[8px] md:text-[10px] text-white p-1 text-center font-bold shadow-inner uppercase">MOV.</div>
+                    <div id="retorno-overflow" class="return-body-color flex-grow h-48 md:h-64 flex flex-col justify-center items-center relative p-1 shadow-inner border-y border-gray-600"></div>
+                    <div class="drum-color w-6 md:w-12 h-24 md:h-48 rounded-r-lg flex flex-col justify-center items-center text-[8px] md:text-[10px] text-white p-1 text-center font-bold shadow-inner uppercase">MOT.</div>
+                </div>
+            </div>
+
+            <!-- Lista de posições para o PDF (oculta na UI normal, visível apenas no PDF ou modal) -->
+            <div id="pdf-list-container" class="hidden mt-8 p-4 border-t border-gray-200">
+                <h2 class="text-lg font-bold text-gray-800 mb-4 uppercase underline">Lista de Substituição Necessária:</h2>
+                <div id="pdf-list-content" class="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm"></div>
+            </div>
+        </div>
+
+        <div id="button-container" class="mt-8 flex flex-wrap justify-center gap-3 hidden"></div>
+    </div>
+
+    <!-- Modais -->
+    <div id="confirmation-modal" class="fixed inset-0 bg-black bg-opacity-60 hidden items-center justify-center p-4 z-50 backdrop-blur-sm" onclick="closeModal()">
+        <div class="bg-white p-6 rounded-xl shadow-2xl max-w-2xl w-full transform transition-all" onclick="event.stopPropagation()">
+            <h3 id="modal-title" class="text-xl font-black text-gray-800 mb-4 border-b-4 border-blue-500 pb-2 uppercase"></h3>
+            <div id="modal-content" class="text-gray-600 mb-6 max-h-[60vh] overflow-y-auto leading-relaxed text-sm"></div>
+            <div id="modal-actions" class="flex justify-end gap-3 pt-4 border-t border-gray-100"></div>
+        </div>
+    </div>
+
+    <script type="module">
+        const { initializeApp, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, getFirestore, doc, onSnapshot, collection, setDoc, getDoc } = window.firebase;
+        let db, auth, currentUser, conveyorsData = {}, currentConveyorKey = null, replacementStatus = null;
+        let undoStack = [];
+
+        const CONVEYOR_DIMENSIONS = { 
+            "AL-201": [10, 4], "TC-201": [47, 12], "TC-202": [13, 4], "TC-203": [8, 4], "TC-204": [41, 14],
+            "TC-205": [6, 2], "TC-206": [48, 15], "TC-207": [28, 10], "TC-208": [34, 11], "TC-209": [41, 14],
+            "TC-210": [20, 8], "TC-211": [15, 6], 
+            "TC-301": [24, 5], "TC-302": [30, 10], 
+            "TC-28": [24, 8], "TC-29": [30, 9], "TC-31": [15, 7]
+        };
+
+        const loader = document.getElementById('loader');
+        const headerControls = document.getElementById('header-controls');
+        const conveyorVisualization = document.getElementById('conveyor-visualization');
+        const buttonContainer = document.getElementById('button-container');
+
+        window.closeModal = () => document.getElementById('confirmation-modal').classList.add('hidden');
+
+        // Função para gerar a lista de texto das posições marcadas
+        function getMarkedPositionsList() {
+            let carga = [], retorno = [], guias = [];
+            
+            replacementStatus.carga.forEach((item, idx) => {
+                const pos = idx + 1;
+                if(item.left === 1) carga.push(`Cav. ${pos} (Esq)`);
+                if(item.center === 1) carga.push(`Cav. ${pos} (Centro)`);
+                if(item.right === 1) carga.push(`Cav. ${pos} (Dir)`);
+                if(item.guideL === 1) guias.push(`Carga Cav. ${pos} (Guia Esq)`);
+                if(item.guideR === 1) guias.push(`Carga Cav. ${pos} (Guia Dir)`);
+            });
+
+            replacementStatus.retorno.forEach((item, idx) => {
+                const pos = idx + 1;
+                if(item.main === 1) retorno.push(`Cav. ${pos}`);
+                if(item.guideL === 1) guias.push(`Retorno Cav. ${pos} (Guia Esq)`);
+                if(item.guideR === 1) guias.push(`Retorno Cav. ${pos} (Guia Dir)`);
+            });
+
+            return { carga, retorno, guias };
+        }
+
+        window.exportToPDF = async () => {
+            const { jsPDF } = window.jspdf;
+            const btn = document.getElementById('btn-export-pdf');
+            const pdfArea = document.getElementById('pdf-content');
+            const listContainer = document.getElementById('pdf-list-container');
+            const listContent = document.getElementById('pdf-list-content');
+            const originalContent = btn.innerHTML;
+            
+            btn.innerHTML = "Gerando Relatório...";
+            btn.disabled = true;
+
+            try {
+                // Preparar a lista para o PDF
+                const lists = getMarkedPositionsList();
+                listContent.innerHTML = `
+                    <div><b class='text-red-700 block mb-1'>CARGA:</b> ${lists.carga.join(', ') || 'Nenhum'}</div>
+                    <div><b class='text-red-700 block mb-1'>RETORNO:</b> ${lists.retorno.join(', ') || 'Nenhum'}</div>
+                    <div><b class='text-red-700 block mb-1'>GUIAS:</b> ${lists.guias.join(', ') || 'Nenhum'}</div>
+                `;
+                
+                listContainer.classList.remove('hidden');
+                pdfArea.classList.add('pdf-capture-mode');
+
+                const canvas = await html2canvas(pdfArea, {
+                    scale: 2, useCORS: true, backgroundColor: "#ffffff"
+                });
+
+                pdfArea.classList.remove('pdf-capture-mode');
+                listContainer.classList.add('hidden');
+
+                const pdf = new jsPDF('l', 'mm', 'a4');
+                const pageWidth = pdf.internal.pageSize.getWidth();
+                pdf.setFont("helvetica", "bold");
+                pdf.setFontSize(14);
+                pdf.text(`RELATÓRIO DE MANUTENÇÃO - ${currentConveyorKey}`, 10, 12);
+                
+                const imgData = canvas.toDataURL('image/png');
+                const margin = 10;
+                const imgWidth = pageWidth - (margin * 2);
+                const imgHeight = (canvas.height * imgWidth) / canvas.width;
+                pdf.addImage(imgData, 'PNG', margin, 20, imgWidth, imgHeight);
+                pdf.save(`Relatorio_${currentConveyorKey}.pdf`);
+            } catch (error) { console.error("Erro PDF:", error); } finally { 
+                btn.innerHTML = originalContent; btn.disabled = false; 
+            }
+        };
+
+        async function saveToFirestore() {
+            if (!db || !currentUser || !currentConveyorKey) return;
+            try {
+                const docRef = doc(db, 'artifacts', window.__app_id, 'public', 'data', 'conveyors', currentConveyorKey);
+                await setDoc(docRef, replacementStatus, { merge: true });
+            } catch (e) { console.error("Save error:", e); }
+        }
+
+        window.toggleRollerStatus = (section, index, subKey) => {
+            if (!replacementStatus) return;
+            let val = replacementStatus[section][index][subKey];
+            if (val === 2) return;
+            const stateBefore = JSON.parse(JSON.stringify(replacementStatus));
+            undoStack.push(stateBefore);
+            if (undoStack.length > 10) undoStack.shift();
+            updateUndoButtonState();
+            replacementStatus[section][index][subKey] = val + 1;
+            saveToFirestore();
+        };
+
+        window.undoLastAction = () => {
+            if (undoStack.length === 0) return;
+            replacementStatus = undoStack.pop();
+            updateUndoButtonState();
+            saveToFirestore();
+        };
+
+        function updateUndoButtonState() {
+            const btn = document.getElementById('btn-undo');
+            if (btn) {
+                if (undoStack.length === 0) btn.classList.add('opacity-40', 'cursor-not-allowed');
+                else btn.classList.remove('opacity-40', 'cursor-not-allowed');
+            }
+        }
+
+        window.resetAllRollers = () => {
+            undoStack = []; updateUndoButtonState();
+            replacementStatus.carga = replacementStatus.carga.map(() => ({ left: 0, center: 0, right: 0, guideL: 0, guideR: 0 }));
+            replacementStatus.retorno = replacementStatus.retorno.map(() => ({ main: 0, guideL: 0, guideR: 0 }));
+            saveToFirestore(); closeModal();
+        };
+
+        window.handleConveyorChange = (key) => { undoStack = []; updateUndoButtonState(); loadConveyor(key); };
+
+        function getStatusClass(val, isGuide = false) {
+            if (val === 1) return 'replace-color';
+            if (val === 2) return 'replaced-color';
+            return isGuide ? 'guide-default' : 'roller-default';
+        }
+
+        function renderCarga() {
+            const parent = document.getElementById('carga-overflow');
+            parent.innerHTML = '';
+            const num = replacementStatus.carga.length;
+            const wrapper = document.createElement('div');
+            wrapper.className = 'flex flex-col justify-between w-full h-full';
+            const numRow = document.createElement('div');
+            numRow.className = 'flex justify-between w-full text-[7px] md:text-[10px] font-black text-gray-500 pb-1';
+            const rollerRow = document.createElement('div');
+            rollerRow.className = 'flex justify-between w-full flex-grow items-center px-0.5';
+            for (let i = 0; i < num; i++) {
+                const data = replacementStatus.carga[i];
+                const trestle = document.createElement('div');
+                trestle.className = 'trestle-container';
+                trestle.style.width = `calc(100% / ${num})`;
+                const gSup = document.createElement('div');
+                gSup.className = `roller-interativo guide-horizontal ${getStatusClass(data.guideL, true)}`;
+                gSup.onclick = () => window.toggleRollerStatus('carga', i, 'guideL');
+                const mainRollers = document.createElement('div');
+                mainRollers.className = 'flex flex-col items-center gap-0.5';
+                ['left', 'center', 'right'].forEach(k => {
+                    const r = document.createElement('div');
+                    r.className = `roller-interativo w-1.5 md:w-4 h-3 md:h-6 rounded-sm shadow-sm ${getStatusClass(data[k])}`;
+                    r.onclick = () => window.toggleRollerStatus('carga', i, k);
+                    mainRollers.appendChild(r);
+                });
+                const gInf = document.createElement('div');
+                gInf.className = `roller-interativo guide-horizontal ${getStatusClass(data.guideR, true)}`;
+                gInf.onclick = () => window.toggleRollerStatus('carga', i, 'guideR');
+                trestle.append(gSup, mainRollers, gInf);
+                rollerRow.appendChild(trestle);
+                const n = document.createElement('div');
+                n.className = 'text-center'; n.style.width = `calc(100% / ${num})`;
+                n.textContent = i + 1; numRow.appendChild(n);
+            }
+            wrapper.append(numRow, rollerRow); parent.appendChild(wrapper);
+        }
+
+        function renderRetorno() {
+            const parent = document.getElementById('retorno-overflow');
+            parent.innerHTML = '';
+            const num = replacementStatus.retorno.length;
+            const wrapper = document.createElement('div');
+            wrapper.className = 'flex flex-col justify-between w-full h-full';
+            const numRow = document.createElement('div');
+            numRow.className = 'flex justify-between w-full text-[7px] md:text-[11px] font-black text-gray-300 pb-2';
+            const rollerRow = document.createElement('div');
+            rollerRow.className = 'flex justify-between w-full flex-grow items-center px-0.5';
+            for (let i = 0; i < num; i++) {
+                const data = replacementStatus.retorno[i];
+                const trestle = document.createElement('div');
+                trestle.className = 'trestle-container';
+                trestle.style.width = `calc(100% / ${num})`;
+                const gSup = document.createElement('div');
+                gSup.className = `roller-interativo guide-horizontal ${getStatusClass(data.guideL, true)}`;
+                gSup.onclick = () => window.toggleRollerStatus('retorno', i, 'guideL');
+                const r = document.createElement('div');
+                r.className = `roller-interativo roller-return-main shadow-lg border border-gray-500/20 ${getStatusClass(data.main)}`;
+                r.onclick = () => window.toggleRollerStatus('retorno', i, 'main');
+                const gInf = document.createElement('div');
+                gInf.className = `roller-interativo guide-horizontal ${getStatusClass(data.guideR, true)}`;
+                gInf.onclick = () => window.toggleRollerStatus('retorno', i, 'guideR');
+                trestle.append(gSup, r, gInf);
+                rollerRow.appendChild(trestle);
+                const n = document.createElement('div');
+                n.className = 'text-center'; n.style.width = `calc(100% / ${num})`;
+                n.textContent = i + 1; numRow.appendChild(n);
+            }
+            wrapper.append(numRow, rollerRow); parent.appendChild(wrapper);
+        }
+
+        function loadConveyor(key) {
+            currentConveyorKey = key;
+            replacementStatus = conveyorsData[key];
+            document.getElementById('main-title').textContent = `MAPA - ${key}`;
+            renderCarga(); renderRetorno();
+        }
+
+        async function init() {
+            try {
+                const app = initializeApp(window.__firebase_config);
+                auth = getAuth(app); db = getFirestore(app);
+                onAuthStateChanged(auth, (user) => { if (user) { currentUser = user; setupListeners(); } });
+                if (window.__initial_auth_token) await signInWithCustomToken(auth, window.__initial_auth_token);
+                else await signInAnonymously(auth);
+            } catch (e) { console.error("Init Error:", e); }
+        }
+
+        function setupListeners() {
+            const colRef = collection(db, 'artifacts', window.__app_id, 'public', 'data', 'conveyors');
+            onSnapshot(colRef, (snap) => {
+                const select = document.getElementById('conveyor-select');
+                const currentVal = select.value || Object.keys(CONVEYOR_DIMENSIONS)[0];
+                snap.forEach(d => { conveyorsData[d.id] = d.data(); });
+                Object.keys(CONVEYOR_DIMENSIONS).forEach(k => {
+                    if(!conveyorsData[k] || !conveyorsData[k].carga[0].hasOwnProperty('guideL')) {
+                        conveyorsData[k] = {
+                            carga: Array(CONVEYOR_DIMENSIONS[k][0]).fill(0).map(() => ({ left: 0, center: 0, right: 0, guideL: 0, guideR: 0 })),
+                            retorno: Array(CONVEYOR_DIMENSIONS[k][1]).fill(0).map(() => ({ main: 0, guideL: 0, guideR: 0 }))
+                        };
+                    }
+                });
+                select.innerHTML = Object.keys(CONVEYOR_DIMENSIONS).map(k => `<option value="${k}" ${k===currentVal?'selected':''}>${k}</option>`).join('');
+                loadConveyor(currentVal);
+                loader.classList.add('hidden'); headerControls.classList.remove('hidden');
+                conveyorVisualization.classList.remove('hidden'); 
+                buttonContainer.classList.remove('hidden');
+            }, (err) => console.error(err));
+        }
+
+        window.openSummaryModal = () => {
+            const lists = getMarkedPositionsList();
+            const modalTitle = document.getElementById('modal-title'), modalContent = document.getElementById('modal-content'), modalActions = document.getElementById('modal-actions');
+            modalTitle.textContent = `RESUMO DE MANUTENÇÃO - ${currentConveyorKey}`;
+            
+            modalContent.innerHTML = `
+                <div class='space-y-6'>
+                    <div class='grid grid-cols-1 md:grid-cols-3 gap-3'>
+                        <div class='p-3 bg-red-50 rounded-lg border border-red-200 text-center'>
+                            <p class='text-xs font-bold text-red-600 uppercase'>Carga</p>
+                            <p class='text-2xl font-black text-red-700'>${lists.carga.length}</p>
+                        </div>
+                        <div class='p-3 bg-red-50 rounded-lg border border-red-200 text-center'>
+                            <p class='text-xs font-bold text-red-600 uppercase'>Retorno</p>
+                            <p class='text-2xl font-black text-red-700'>${lists.retorno.length}</p>
+                        </div>
+                        <div class='p-3 bg-red-50 rounded-lg border border-red-200 text-center'>
+                            <p class='text-xs font-bold text-red-600 uppercase'>Guias</p>
+                            <p class='text-2xl font-black text-red-700'>${lists.guias.length}</p>
+                        </div>
+                    </div>
+
+                    <div class='space-y-4'>
+                        <div class='border-l-4 border-red-500 pl-3'>
+                            <h4 class='font-black text-gray-800 text-sm mb-1'>ROLETES DE CARGA:</h4>
+                            <p class='text-gray-600 italic'>${lists.carga.join(', ') || 'Nenhuma pendência.'}</p>
+                        </div>
+                        <div class='border-l-4 border-red-500 pl-3'>
+                            <h4 class='font-black text-gray-800 text-sm mb-1'>ROLETES DE RETORNO:</h4>
+                            <p class='text-gray-600 italic'>${lists.retorno.join(', ') || 'Nenhuma pendência.'}</p>
+                        </div>
+                        <div class='border-l-4 border-red-500 pl-3'>
+                            <h4 class='font-black text-gray-800 text-sm mb-1'>ROLETES GUIA:</h4>
+                            <p class='text-gray-600 italic'>${lists.guias.join(', ') || 'Nenhuma pendência.'}</p>
+                        </div>
+                    </div>
+                </div>
+            `;
+            modalActions.innerHTML = `<button onclick='closeModal()' class='px-6 py-2 bg-blue-600 text-white rounded-lg font-bold'>Fechar</button>`;
+            document.getElementById('confirmation-modal').classList.replace('hidden', 'flex');
+        };
+
+        window.openResetConfirmationModal = () => {
+            const modalTitle = document.getElementById('modal-title'), modalContent = document.getElementById('modal-content'), modalActions = document.getElementById('modal-actions');
+            modalTitle.textContent = `RESETAR EQUIPAMENTO?`;
+            modalContent.innerHTML = `<p class='text-gray-700'>Deseja apagar **todas** as marcações do transportador <b>${currentConveyorKey}</b>?</p>`;
+            modalActions.innerHTML = `<button onclick='closeModal()' class='px-6 py-2 bg-gray-200 rounded-lg font-bold text-gray-600'>Não</button><button id='btn-confirm-reset' class='px-6 py-2 bg-red-600 text-white rounded-lg font-bold'>Sim, RESETAR</button>`;
+            document.getElementById('confirmation-modal').classList.replace('hidden', 'flex');
+            document.getElementById('btn-confirm-reset').onclick = resetAllRollers;
+        };
+
+        window.onload = () => {
+            const b1 = document.createElement('button');
+            b1.className = 'bg-blue-600 text-white px-4 py-3 rounded-xl font-black uppercase shadow-lg text-[10px] md:text-sm';
+            b1.textContent = 'RESUMO / LISTA'; b1.onclick = window.openSummaryModal;
+            const bUndo = document.createElement('button');
+            bUndo.id = 'btn-undo'; bUndo.className = 'bg-yellow-400 text-black px-4 py-3 rounded-xl font-black uppercase shadow-lg text-[10px] md:text-sm transition-all opacity-40 cursor-not-allowed';
+            bUndo.textContent = 'Desfazer'; bUndo.onclick = window.undoLastAction;
+            const b2 = document.createElement('button');
+            b2.className = 'bg-red-600 text-white px-4 py-3 rounded-xl font-black uppercase shadow-lg text-[10px] md:text-sm';
+            b2.textContent = 'RESET'; b2.onclick = window.openResetConfirmationModal;
+            buttonContainer.append(b1, bUndo, b2);
+            init();
+        };
+    </script>
+</body>
+</html>
